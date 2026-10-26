@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AI Agent Tracker</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0e12; --panel:#121820; --line:#26303b; --text:#edf2f7; --muted:#9aa7b5; --accent:#ff9b54; --good:#73d9a1; --warn:#f2c66d; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:radial-gradient(ellipse at top left,#17202b 0,transparent 42%),var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
+    main { max-width:1180px; margin:0 auto; padding:36px 22px 64px; }
+    header { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:30px; }
+    .eyebrow { color:var(--accent); text-transform:uppercase; letter-spacing:.16em; font-size:11px; font-weight:800; }
+    h1 { font-size:clamp(30px,5vw,48px); line-height:1.05; margin:8px 0 12px; letter-spacing:-.04em; }
+    p { color:var(--muted); margin:0; max-width:680px; }
+    .live { border:1px solid var(--line); border-radius:999px; padding:8px 12px; color:var(--muted); white-space:nowrap; font-size:12px; }
+    .live::before { content:""; display:inline-block; width:7px; height:7px; background:var(--good); border-radius:50%; margin-right:8px; }
+    .stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:26px 0; }
+    .stat,.panel { background:linear-gradient(145deg,rgba(255,255,255,.035),transparent 65%),var(--panel); border:1px solid var(--line); border-radius:16px; }
+    .stat { padding:18px 20px; }
+    .stat span { display:block; color:var(--muted); font-size:12px; }
+    .stat strong { display:block; font-size:28px; letter-spacing:-.04em; margin-top:6px; }
+    .panel { overflow:hidden; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:16px; border-bottom:1px solid var(--line); }
+    input { flex:1; min-width:190px; background:#0b1016; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:11px 13px; font:inherit; outline:none; }
+    input:focus { border-color:var(--accent); }
+    button { background:#202a35; border:1px solid #344252; color:var(--text); border-radius:10px; padding:10px 14px; font:inherit; cursor:pointer; }
+    button:hover { border-color:var(--accent); }
+    .meta { color:var(--muted); font-size:12px; }
+    .table-wrap { overflow-x:auto; }
+    table { border-collapse:collapse; width:100%; min-width:720px; }
+    th,td { text-align:left; padding:14px 16px; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; font-weight:700; }
+    td { font-size:13px; }
+    tr:last-child td { border-bottom:0; }
+    .name { font-weight:700; color:var(--text); text-decoration:none; }
+    .name:hover { color:var(--accent); }
+    .desc { color:var(--muted); max-width:500px; overflow-wrap:anywhere; margin-top:4px; }
+    .pill { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:3px 8px; color:var(--muted); font-size:11px; white-space:nowrap; }
+    .pill.up { color:var(--good); border-color:#285b45; }
+    .pill.down { color:var(--warn); border-color:#5e4c29; }
+    .empty { padding:44px 20px; text-align:center; color:var(--muted); }
+    footer { color:#748191; font-size:12px; margin-top:16px; }
+    @media(max-width:650px) { main{padding:24px 14px 44px} header{display:block} .live{display:inline-block;margin-top:18px} .stats{grid-template-columns:1fr} .stat{padding:14px 16px} }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <div class="eyebrow">Public discovery · opt-in monitoring</div>
+      <h1>AI Agent Tracker</h1>
+      <p>Browse public AI-agent project candidates and inspect status reported by explicitly registered health endpoints. A repository listing does not prove an agent is currently running.</p>
+    </div>
+    <div class="live" id="connection">Connecting to API</div>
+  </header>
+  <section class="stats" aria-label="Tracker summary">
+    <div class="stat"><span>Discovered projects</span><strong id="total">—</strong></div>
+    <div class="stat"><span>Reported UP</span><strong id="up">—</strong></div>
+    <div class="stat"><span>Languages observed</span><strong id="languages">—</strong></div>
+  </section>
+  <section class="panel">
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search projects by name…" aria-label="Search projects">
+      <button id="refresh" type="button">Refresh</button>
+      <span class="meta" id="updated">Waiting for first response</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Project</th><th>Language</th><th>Stars</th><th>Reported status</th><th>Last seen</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5" class="empty">Loading discovered projects…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  <footer>Refreshes every 30 seconds. Monitoring requires operator authorization and an allowlisted HTTPS endpoint. No administrative token is stored in this page.</footer>
+</main>
+<script>
+(() => {
+  const rows = document.getElementById("rows");
+  const search = document.getElementById("search");
+  const connection = document.getElementById("connection");
+  const updated = document.getElementById("updated");
+  let agents = [];
+  const fmt = (value) => value ? new Date(value).toLocaleString() : "—";
+  const statusClass = (value) => value === "UP" ? "pill up" : (value && value !== "UNKNOWN" ? "pill down" : "pill");
+  function render() {
+    const q = search.value.trim().toLowerCase();
+    const filtered = agents.filter(a => String(a.name || "").toLowerCase().includes(q) || String(a.description || "").toLowerCase().includes(q));
+    rows.replaceChildren();
+    if (!filtered.length) {
+      const tr = document.createElement("tr"), td = document.createElement("td");
+      td.colSpan = 5; td.className = "empty"; td.textContent = agents.length ? "No projects match this search." : "No projects discovered yet. Run the authenticated GitHub discovery endpoint to populate the catalogue.";
+      tr.append(td); rows.append(tr); return;
+    }
+    for (const agent of filtered) {
+      const tr = document.createElement("tr");
+      const project = document.createElement("td");
+      const link = document.createElement("a");
+      link.className = "name"; link.href = agent.source_url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = agent.name || "Unnamed project";
+      const desc = document.createElement("div"); desc.className = "desc"; desc.textContent = agent.description || "No description provided.";
+      project.append(link, desc);
+      const lang = document.createElement("td"); lang.textContent = agent.language || "—";
+      const stars = document.createElement("td"); stars.textContent = Number(agent.stars || 0).toLocaleString();
+      const state = document.createElement("td"); const pill = document.createElement("span"); pill.className = statusClass(agent.runtime_status); pill.textContent = agent.runtime_status || "UNKNOWN"; state.append(pill);
+      const seen = document.createElement("td"); seen.textContent = fmt(agent.last_seen_at);
+      tr.append(project, lang, stars, state, seen); rows.append(tr);
+    }
+  }
+  async function load() {
+    try {
+      const response = await fetch("/api/agents?limit=200", {headers:{Accept:"application/json"}, cache:"no-store"});
+      if (!response.ok) throw new Error("API returned HTTP " + response.status);
+      const data = await response.json();
+      agents = Array.isArray(data.items) ? data.items : [];
+      document.getElementById("total").textContent = agents.length.toLocaleString();
+      document.getElementById("up").textContent = agents.filter(a => a.runtime_status === "UP").length.toLocaleString();
+      document.getElementById("languages").textContent = new Set(agents.map(a => a.language).filter(Boolean)).size.toLocaleString();
+      connection.textContent = "API connected";
+      updated.textContent = "Updated " + new Date().toLocaleTimeString();
+      render();
+    } catch (error) {
+      connection.textContent = "API unavailable";
+      updated.textContent = error.message || "Request failed";
+      if (!agents.length) {
+        rows.replaceChildren();
+        const tr = document.createElement("tr"), td = document.createElement("td");
+        td.colSpan = 5; td.className = "empty"; td.textContent = "Could not load the catalogue. Check that the API is running and try again.";
+        tr.append(td); rows.append(tr);
+      }
+    }
+  }
+  search.addEventListener("input", render);
+  document.getElementById("refresh").addEventListener("click", load);
+  load();
+  setInterval(load, 30000);
+})();
+</script>
+</body>
+</html>
