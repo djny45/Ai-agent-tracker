@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import hmac
+import ipaddress
 import logging
 import os
+import socket
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field, HttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import DateTime, Integer, String, Text, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
@@ -21,8 +28,19 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     database_url: str = "sqlite:///./uaat-dev.db"
     github_token: str = ""
+    admin_api_token: str = ""
     discovery_interval_minutes: int = 30
+    endpoint_check_interval_minutes: int = 5
     github_search_query: str = "topic:ai-agent"
+    monitor_allowed_hosts: str = ""
+
+    @property
+    def allowed_hosts(self) -> set[str]:
+        return {
+            item.strip().lower().rstrip(".")
+            for item in self.monitor_allowed_hosts.split(",")
+            if item.strip()
+        }
 
 
 settings = Settings()
@@ -32,6 +50,7 @@ engine = create_engine(
     connect_args={"check_same_thread": False} if settings.database_url.startswith("sqlite") else {},
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class Base(DeclarativeBase):
@@ -67,15 +86,51 @@ class Observation(Base):
     detail: Mapped[str] = mapped_column(Text, default="")
 
 
+class MonitoredEndpoint(Base):
+    __tablename__ = "monitored_endpoints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[int] = mapped_column(Integer, index=True)
+    url: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str] = mapped_column(String(32), default="UNKNOWN")
+
+
 Base.metadata.create_all(bind=engine)
 scheduler = AsyncIOScheduler()
+
+
+class EndpointRegistration(BaseModel):
+    agent_id: int = Field(ge=1)
+    url: HttpUrl
+
+
+def require_admin(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> None:
+    expected = settings.admin_api_token
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Administrative API is disabled until ADMIN_API_TOKEN is configured.",
+        )
+    if credentials is None or credentials.scheme.lower() != "bearer" or not hmac.compare_digest(
+        credentials.credentials, expected
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Valid bearer token required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def github_headers() -> dict[str, str]:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "Universal-Agent-Tracker/0.1",
+        "User-Agent": "Universal-Agent-Tracker/0.2",
     }
     if settings.github_token:
         headers["Authorization"] = f"Bearer {settings.github_token}"
@@ -91,10 +146,52 @@ def parse_datetime(value: str | None) -> datetime | None:
         return None
 
 
+def validate_monitor_url(raw_url: str) -> str:
+    if len(raw_url) > 2048:
+        raise HTTPException(status_code=422, detail="Endpoint URL is too long.")
+    parsed = urlsplit(raw_url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme.lower() != "https" or not host:
+        raise HTTPException(status_code=422, detail="Only HTTPS endpoint URLs are accepted.")
+    if parsed.username or parsed.password or parsed.fragment:
+        raise HTTPException(status_code=422, detail="Endpoint URL must not contain credentials or fragments.")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise HTTPException(status_code=422, detail="IP-literal endpoint URLs are not accepted.")
+    if host not in settings.allowed_hosts:
+        raise HTTPException(
+            status_code=403,
+            detail="Hostname is not in MONITOR_ALLOWED_HOSTS; add an exact hostname you control.",
+        )
+    return host
+
+
+async def resolve_public_host(host: str) -> None:
+    """Reject DNS answers that include private, loopback, link-local, or reserved IPs."""
+    loop = asyncio.get_running_loop()
+    try:
+        answers = await loop.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("DNS resolution failed") from exc
+    addresses = {answer[4][0].split("%", 1)[0] for answer in answers}
+    if not addresses:
+        raise ValueError("DNS returned no addresses")
+    for address in addresses:
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ValueError("DNS returned an invalid address") from exc
+        if not parsed.is_global:
+            raise ValueError("DNS resolved to a non-public address")
+
+
 async def discover_github() -> dict[str, Any]:
     """Discover public repository candidates; this does not claim they are running agents."""
     params = {"q": settings.github_search_query, "sort": "updated", "order": "desc", "per_page": 50}
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False, trust_env=False) as client:
         response = await client.get(
             "https://api.github.com/search/repositories",
             params=params,
@@ -146,11 +243,96 @@ async def discover_github() -> dict[str, Any]:
     return {"source": "github", "received": len(items), "inserted": inserted, "updated": updated, "checked_at": now.isoformat()}
 
 
+async def check_endpoint(endpoint_id: int) -> dict[str, Any]:
+    with SessionLocal() as session:
+        endpoint = session.get(MonitoredEndpoint, endpoint_id)
+        if endpoint is None or not endpoint.enabled:
+            return {"endpoint_id": endpoint_id, "status": "SKIPPED"}
+        url = endpoint.url
+        agent_id = endpoint.agent_id
+
+    now = datetime.now(timezone.utc)
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    try:
+        # Revalidate every run; redirects are disabled so a target cannot redirect the
+        # monitor to a different host. Exact operator allowlisting is mandatory.
+        validated_host = validate_monitor_url(url)
+        await resolve_public_host(validated_host)
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0, connect=3.0),
+            follow_redirects=False,
+            trust_env=False,
+            verify=True,
+            headers={"User-Agent": "Universal-Agent-Tracker-Monitor/0.2"},
+        ) as client:
+            response = await client.get(url)
+        if 200 <= response.status_code < 300:
+            result_status = "UP"
+            detail = f"HTTP {response.status_code}"
+        elif 300 <= response.status_code < 400:
+            result_status = "REDIRECT_BLOCKED"
+            detail = f"Redirect response HTTP {response.status_code}; redirects are not followed"
+        else:
+            result_status = "HTTP_ERROR"
+            detail = f"HTTP {response.status_code}"
+    except (HTTPException, ValueError) as exc:
+        result_status = "BLOCKED"
+        detail = str(exc.detail if isinstance(exc, HTTPException) else exc)[:500]
+    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        result_status = "UNREACHABLE"
+        detail = type(exc).__name__
+    except Exception as exc:
+        logger.exception("Endpoint monitor failed for endpoint_id=%s", endpoint_id)
+        result_status = "ERROR"
+        detail = type(exc).__name__
+
+    with SessionLocal() as session:
+        endpoint = session.get(MonitoredEndpoint, endpoint_id)
+        if endpoint is None:
+            return {"endpoint_id": endpoint_id, "status": "SKIPPED"}
+        endpoint.last_checked_at = now
+        endpoint.last_status = result_status
+        session.add(
+            Observation(
+                agent_id=agent_id,
+                observed_at=now,
+                observation_type="endpoint_health",
+                status=result_status,
+                detail=f"endpoint_id={endpoint_id}; host={host}; {detail}"[:1000],
+            )
+        )
+        agent = session.get(Agent, agent_id)
+        if agent is not None:
+            agent.runtime_status = result_status
+        session.commit()
+    return {"endpoint_id": endpoint_id, "status": result_status, "detail": detail, "checked_at": now.isoformat()}
+
+
+async def run_endpoint_checks() -> None:
+    with SessionLocal() as session:
+        endpoint_ids = session.scalars(
+            select(MonitoredEndpoint.id)
+            .where(MonitoredEndpoint.enabled.is_(True))
+            .order_by(MonitoredEndpoint.id.asc())
+            .limit(100)
+        ).all()
+    for endpoint_id in endpoint_ids:
+        await check_endpoint(endpoint_id)
+
+
 async def scheduled_discovery() -> None:
     try:
         await discover_github()
     except Exception:
         logger.exception("Scheduled GitHub discovery failed")
+
+
+async def scheduled_endpoint_checks() -> None:
+    try:
+        await run_endpoint_checks()
+    except Exception:
+        logger.exception("Scheduled endpoint checks failed")
 
 
 @asynccontextmanager
@@ -165,6 +347,17 @@ async def lifespan(_: FastAPI):
             coalesce=True,
             max_instances=1,
         )
+    if settings.endpoint_check_interval_minutes > 0:
+        scheduler.add_job(
+            scheduled_endpoint_checks,
+            "interval",
+            minutes=max(1, settings.endpoint_check_interval_minutes),
+            id="endpoint-health-checks",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+    if scheduler.get_jobs():
         scheduler.start()
     yield
     if scheduler.running:
@@ -173,8 +366,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Universal AI Agent Tracker",
-    version="0.1.0",
-    description="Public AI agent project discovery and observability metadata. Discovery is not proof of runtime execution.",
+    version="0.2.0",
+    description="Public AI agent project discovery and opt-in endpoint health metadata. Discovery is not proof of runtime execution.",
     lifespan=lifespan,
 )
 
@@ -225,10 +418,72 @@ def list_agents(
         }
 
 
-@app.post("/api/discovery/github")
+@app.post("/api/discovery/github", dependencies=[Depends(require_admin)])
 async def run_github_discovery() -> dict[str, Any]:
-    # Keep this route private or protect it with authentication before public exposure.
     return await discover_github()
+
+
+@app.post("/api/endpoints", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+def register_endpoint(payload: EndpointRegistration) -> dict[str, Any]:
+    url = str(payload.url)
+    validate_monitor_url(url)
+    with SessionLocal() as session:
+        if session.get(Agent, payload.agent_id) is None:
+            raise HTTPException(status_code=404, detail="Agent not found. Discover or add the agent first.")
+        existing = session.scalar(
+            select(MonitoredEndpoint).where(
+                MonitoredEndpoint.agent_id == payload.agent_id,
+                MonitoredEndpoint.url == url,
+            )
+        )
+        if existing is not None:
+            existing.enabled = True
+            session.commit()
+            return {"id": existing.id, "agent_id": existing.agent_id, "url": existing.url, "enabled": existing.enabled}
+        endpoint = MonitoredEndpoint(agent_id=payload.agent_id, url=url, enabled=True)
+        session.add(endpoint)
+        session.commit()
+        session.refresh(endpoint)
+        return {"id": endpoint.id, "agent_id": endpoint.agent_id, "url": endpoint.url, "enabled": endpoint.enabled}
+
+
+@app.get("/api/endpoints", dependencies=[Depends(require_admin)])
+def list_endpoints() -> dict[str, Any]:
+    with SessionLocal() as session:
+        rows = session.scalars(select(MonitoredEndpoint).order_by(MonitoredEndpoint.id.asc()).limit(500)).all()
+        return {
+            "items": [
+                {
+                    "id": row.id,
+                    "agent_id": row.agent_id,
+                    "url": row.url,
+                    "enabled": row.enabled,
+                    "last_checked_at": row.last_checked_at.isoformat() if row.last_checked_at else None,
+                    "last_status": row.last_status,
+                }
+                for row in rows
+            ]
+        }
+
+
+@app.post("/api/endpoints/{endpoint_id}/check", dependencies=[Depends(require_admin)])
+async def trigger_endpoint_check(endpoint_id: int) -> dict[str, Any]:
+    with SessionLocal() as session:
+        endpoint = session.get(MonitoredEndpoint, endpoint_id)
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Endpoint not found.")
+    return await check_endpoint(endpoint_id)
+
+
+@app.post("/api/endpoints/{endpoint_id}/disable", dependencies=[Depends(require_admin)])
+def disable_endpoint(endpoint_id: int) -> dict[str, Any]:
+    with SessionLocal() as session:
+        endpoint = session.get(MonitoredEndpoint, endpoint_id)
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Endpoint not found.")
+        endpoint.enabled = False
+        session.commit()
+        return {"id": endpoint.id, "enabled": endpoint.enabled}
 
 
 @app.get("/api/observations")
@@ -256,3 +511,4 @@ def list_observations(
                 for row in rows
             ]
         }
+}
