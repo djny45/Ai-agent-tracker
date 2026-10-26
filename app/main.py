@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, HttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import DateTime, Integer, String, Text, create_engine, select
+from sqlalchemy import DateTime, Integer, String, Text, create_engine, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -402,11 +402,16 @@ def list_agents(
 ) -> dict[str, Any]:
     with SessionLocal() as session:
         query = select(Agent)
+        count_query = select(func.count(Agent.id))
         if search:
-            query = query.where(Agent.name.ilike(f"%{search}%"))
+            name_filter = Agent.name.ilike(f"%{search}%")
+            query = query.where(name_filter)
+            count_query = count_query.where(name_filter)
+        total = session.scalar(count_query) or 0
         query = query.order_by(Agent.stars.desc(), Agent.name.asc()).limit(limit).offset(offset)
         rows = session.scalars(query).all()
         return {
+            "total": total,
             "items": [
                 {
                     "id": row.id,
