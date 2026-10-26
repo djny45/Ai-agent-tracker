@@ -6,6 +6,8 @@ Discover public AI-agent project candidates and monitor explicitly registered ru
 
 ## Current capabilities
 
+- Read-only web dashboard at `/` with project search, language counts, stars, reported status, and refresh every 30 seconds.
+
 - FastAPI API and SQLAlchemy persistence.
 - GitHub repository discovery.
 - Authenticated administrative routes using a server-side bearer token.
@@ -38,6 +40,7 @@ For local development, install `requirements.txt` and run `uvicorn app.main:app 
 
 | Method | Endpoint | Access | Purpose |
 | --- | --- | --- | --- |
+| GET | `/` | Public | Read-only project dashboard |
 | GET | `/health` | Public | Database-backed health check |
 | GET | `/api/agents` | Public | List discovered candidates; supports `search`, `limit`, `offset` |
 | POST | `/api/discovery/github` | Admin token | Run GitHub discovery immediately |
