@@ -32,6 +32,7 @@ def test_monitor_url_requires_https_and_exact_allowlisted_host():
             "https://other.example.com/health",
             "https://127.0.0.1/health",
             "https://user:pass@status.example.com/health",
+            "https://status.example.com:8443/health",
             "https://status.example.com/health#fragment",
         ):
             try:
