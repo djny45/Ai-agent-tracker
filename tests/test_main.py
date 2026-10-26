@@ -60,9 +60,15 @@ def test_monitor_url_fails_closed_when_allowlist_is_empty():
         settings.monitor_allowed_hosts = original
 
 
-def test_dashboard_is_served_from_root():
+def test_dashboard_public_api_and_admin_fail_closed(monkeypatch):
+    monkeypatch.setattr(settings, "admin_api_token", "")
     with TestClient(app) as client:
-        response = client.get("/")
-    assert response.status_code == 200
-    assert "AI Agent Tracker" in response.text
-    assert "No administrative token is stored in this page." in response.text
+        dashboard_response = client.get("/")
+        agents_response = client.get("/api/agents")
+        admin_response = client.post("/api/discovery/github")
+    assert dashboard_response.status_code == 200
+    assert "AI Agent Tracker" in dashboard_response.text
+    assert "No administrative token is stored in this page." in dashboard_response.text
+    assert agents_response.status_code == 200
+    assert agents_response.json()["total"] >= 0
+    assert admin_response.status_code == 503
