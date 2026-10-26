@@ -2,35 +2,36 @@
 
 This document distinguishes committed code from planned capabilities.
 
-## Implemented in the bootstrap
+## Implemented
 
-- FastAPI app with `/health`, `/api/agents`, `/api/discovery/github`, and `/api/observations`.
-- SQLAlchemy models for discovered repositories and observations.
-- GitHub repository search connector using the official REST API.
-- Optional GitHub token from server-side environment configuration.
-- Periodic GitHub discovery job with a minimum 15-minute interval.
-- Docker Compose deployment with PostgreSQL on an internal network and API port bound to localhost.
-- Initial unit tests for timestamp parsing and GitHub request headers.
+- FastAPI app with health, agent-list, GitHub discovery, endpoint, and observation routes.
+- SQLAlchemy models for discovered repositories, observations, and explicitly registered endpoints.
+- GitHub public repository search connector with optional server-side token.
+- Periodic GitHub discovery job.
+- Bearer-token authentication for administrative operations; administrative routes fail closed when ADMIN_API_TOKEN is unset.
+- HTTPS endpoint registration restricted to exact MONITOR_ALLOWED_HOSTS entries.
+- DNS resolution checks reject non-public addresses; monitoring requests do not follow redirects, use short timeouts, and do not trust proxy environment variables.
+- Scheduled health checks record timestamped observations and update the associated agent's latest runtime status.
+- Docker Compose scaffold with PostgreSQL on an internal network and API port bound to localhost.
+- Initial unit tests and a GitHub Actions CI workflow.
 
-## Not implemented yet
+## Not implemented / not yet verified
 
-- Runtime endpoint registration and active health checking.
-- Endpoint SSRF protection and monitoring allowlists.
-- Observation creation from monitoring jobs.
-- Authentication / authorization for administrative routes.
-- Database migrations; the bootstrap currently creates tables on startup.
-- Alert delivery, dashboard frontend, OpenTelemetry ingestion, and Hugging Face connector.
-- Automated CI execution and a verified VPS deployment.
+- Tests have not been executed in a live GitHub Actions runner or VPS during this change.
+- No production-grade database migration framework; SQLAlchemy creates new tables at startup.
+- No dashboard frontend, alert delivery, OpenTelemetry ingestion, or additional discovery connectors.
+- No verified VPS deployment, TLS reverse proxy, backup/restore drill, or production load test.
+- DNS is checked before a request, but HTTPX resolves the hostname again when connecting. Use an outbound firewall and only allowlist hostnames controlled by you; strict IP-pinned transport is a further hardening item.
 
-## Before public deployment
+## Security and deployment checklist
 
-1. Add authentication to discovery and all administrative endpoints.
-2. Add endpoint monitoring only with strict SSRF controls, redirect handling, DNS/IP validation, and explicit registration.
-3. Add migrations, automated tests, backup/restore validation, and request rate limiting.
-4. Place the API behind TLS and an authenticated reverse proxy; do not expose the database.
-5. Run the tests and inspect logs in the actual VPS environment.
-6. Confirm API source limits and applicable terms before increasing discovery frequency.
+1. Set ADMIN_API_TOKEN to a long random secret and keep it server-side.
+2. Set MONITOR_ALLOWED_HOSTS to exact HTTPS hostnames you own and authorize; no wildcard entries.
+3. Keep the API bound to localhost behind an authenticated TLS reverse proxy. Do not expose PostgreSQL.
+4. Add an outbound network policy/firewall that blocks private, loopback, link-local, and metadata-service destinations.
+5. Add a migration framework, rate limiting, audit logging, backup/restore validation, and dependency scanning before production use.
+6. Run CI and test the actual VPS environment before claiming production readiness.
 
 ## Accuracy policy
 
-A public repository is a discovered project candidate, not proof of an autonomous agent. A successful HTTP check indicates only that an endpoint responded. Runtime execution requires explicit telemetry from a participating agent or operator.
+A public repository is a discovered project candidate, not proof that an agent is running. An HTTP health response proves only that the configured endpoint responded. Runtime execution requires explicit telemetry from a participating agent or operator.
