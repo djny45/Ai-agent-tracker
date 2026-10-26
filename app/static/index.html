@@ -113,7 +113,7 @@
       if (!response.ok) throw new Error("API returned HTTP " + response.status);
       const data = await response.json();
       agents = Array.isArray(data.items) ? data.items : [];
-      document.getElementById("total").textContent = agents.length.toLocaleString();
+      document.getElementById("total").textContent = Number(data.total ?? agents.length).toLocaleString();
       document.getElementById("up").textContent = agents.filter(a => a.runtime_status === "UP").length.toLocaleString();
       document.getElementById("languages").textContent = new Set(agents.map(a => a.language).filter(Boolean)).size.toLocaleString();
       connection.textContent = "API connected";
