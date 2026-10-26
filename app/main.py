@@ -153,6 +153,8 @@ def validate_monitor_url(raw_url: str) -> str:
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme.lower() != "https" or not host:
         raise HTTPException(status_code=422, detail="Only HTTPS endpoint URLs are accepted.")
+    if parsed.port not in (None, 443):
+        raise HTTPException(status_code=422, detail="Only the standard HTTPS port 443 is accepted.")
     if parsed.username or parsed.password or parsed.fragment:
         raise HTTPException(status_code=422, detail="Endpoint URL must not contain credentials or fragments.")
     try:
