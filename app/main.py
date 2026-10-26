@@ -511,4 +511,3 @@ def list_observations(
                 for row in rows
             ]
         }
-}
