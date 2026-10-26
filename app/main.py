@@ -266,16 +266,18 @@ async def check_endpoint(endpoint_id: int) -> dict[str, Any]:
             verify=True,
             headers={"User-Agent": "Universal-Agent-Tracker-Monitor/0.2"},
         ) as client:
-            response = await client.get(url)
-        if 200 <= response.status_code < 300:
+            # Stream and close without reading the body to avoid downloading large responses.
+            async with client.stream("GET", url) as response:
+                response_status = response.status_code
+        if 200 <= response_status < 300:
             result_status = "UP"
-            detail = f"HTTP {response.status_code}"
-        elif 300 <= response.status_code < 400:
+            detail = f"HTTP {response_status}"
+        elif 300 <= response_status < 400:
             result_status = "REDIRECT_BLOCKED"
-            detail = f"Redirect response HTTP {response.status_code}; redirects are not followed"
+            detail = f"Redirect response HTTP {response_status}; redirects are not followed"
         else:
             result_status = "HTTP_ERROR"
-            detail = f"HTTP {response.status_code}"
+            detail = f"HTTP {response_status}"
     except (HTTPException, ValueError) as exc:
         result_status = "BLOCKED"
         detail = str(exc.detail if isinstance(exc, HTTPException) else exc)[:500]
