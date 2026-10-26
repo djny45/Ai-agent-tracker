@@ -6,6 +6,7 @@ import ipaddress
 import logging
 import os
 import socket
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -14,6 +15,7 @@ from urllib.parse import urlsplit
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, HttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -374,6 +376,11 @@ app = FastAPI(
     description="Public AI agent project discovery and opt-in endpoint health metadata. Discovery is not proof of runtime execution.",
     lifespan=lifespan,
 )
+
+
+@app.get("/", include_in_schema=False)
+def dashboard() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "index.html", media_type="text/html")
 
 
 @app.get("/health")
