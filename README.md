@@ -1,65 +1,92 @@
 # Universal AI Agent Tracker
 
-Discover and catalogue publicly visible AI-agent projects, then build toward opt-in runtime monitoring from participating operators.
+Discover public AI-agent project candidates and monitor explicitly registered runtime endpoints with operator authorization.
 
-> **Current stage: bootstrap.** This repository discovers public GitHub repository candidates. It does not yet provide universal live tracking, and repository discovery is not evidence that an agent is running.
+> **Current stage: early implementation.** This is not a universal directory of every AI agent. Public repository discovery does not prove that an agent is running.
 
 ## Current capabilities
 
-- FastAPI service with health, agent-list, discovery, and observation endpoints.
-- GitHub public repository discovery through the official REST API.
-- PostgreSQL persistence via SQLAlchemy.
-- Scheduled discovery (minimum 15-minute interval).
-- Docker Compose deployment scaffold with the API bound to localhost by default.
-- Initial unit tests.
+- FastAPI API and SQLAlchemy persistence.
+- GitHub repository discovery.
+- Authenticated administrative routes using a server-side bearer token.
+- Operator-registered HTTPS health endpoints, restricted to an exact hostname allowlist.
+- Scheduled endpoint checks with short timeouts and redirects disabled.
+- Timestamped health observations and latest status per associated agent.
+- Docker Compose deployment scaffold and initial CI tests.
 
 ## Quick start (Docker Compose)
 
 ```bash
 cp .env.example .env
+openssl rand -hex 32
 ```
 
-Edit `.env` and replace `POSTGRES_PASSWORD` with a long random secret. Ensure `DATABASE_URL` uses the same password, then run:
+Put the generated value into `ADMIN_API_TOKEN`. Replace `POSTGRES_PASSWORD` with a long random password and update the password in `DATABASE_URL` to match. Set `MONITOR_ALLOWED_HOSTS` to exact HTTPS hostnames you own and authorize, separated by commas. Leave it empty if you do not want endpoint monitoring enabled.
+
+Start the service:
 
 ```bash
 docker compose up --build -d
 docker compose logs -f api
 ```
 
-The API listens on `127.0.0.1:8000` on the host. Check health at `http://127.0.0.1:8000/health`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
+The API is exposed on host loopback at `127.0.0.1:8000`. Health check: `http://127.0.0.1:8000/health`. Interactive API documentation: `http://127.0.0.1:8000/docs`.
 
-For local development, install `requirements.txt` and run `uvicorn app.main:app --reload`. The application defaults to a local SQLite database if `DATABASE_URL` is not set.
+For local development, install `requirements.txt` and run `uvicorn app.main:app --reload`. The app uses a local SQLite database when `DATABASE_URL` is unset.
 
-## API endpoints
+## API
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| GET | `/health` | Database-backed health check |
-| GET | `/api/agents` | List discovered project candidates; supports `search`, `limit`, `offset` |
-| POST | `/api/discovery/github` | Trigger GitHub discovery |
-| GET | `/api/observations?agent_id=1` | Read stored observations |
+| Method | Endpoint | Access | Purpose |
+| --- | --- | --- | --- |
+| GET | `/health` | Public | Database-backed health check |
+| GET | `/api/agents` | Public | List discovered candidates; supports `search`, `limit`, `offset` |
+| POST | `/api/discovery/github` | Admin token | Run GitHub discovery immediately |
+| POST | `/api/endpoints` | Admin token | Register an authorized HTTPS endpoint for an existing agent |
+| GET | `/api/endpoints` | Admin token | List registered endpoints and latest status |
+| POST | `/api/endpoints/{id}/check` | Admin token | Trigger a health check |
+| POST | `/api/endpoints/{id}/disable` | Admin token | Disable scheduled checks for an endpoint |
+| GET | `/api/observations?agent_id=1` | Public | Read stored observations for an agent |
 
-**Security note:** the discovery trigger is not authenticated in this bootstrap. Keep the API private and localhost-bound until authentication and authorization are implemented. Never expose secrets in client code or commit a real `.env` file.
+Admin calls use the header `Authorization: Bearer YOUR_ADMIN_API_TOKEN`. Do not place the token in frontend code or commit it to Git.
+
+### Example registration
+
+First run discovery, then inspect `GET /api/agents` and choose an existing agent ID. Register an HTTPS health endpoint whose hostname is in your allowlist:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/endpoints \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": 1, "url": "https://status.example.com/health"}'
+```
+
+Replace the example URL with a health endpoint you own or have explicit permission to monitor. The service rejects non-HTTPS URLs, credentials, IP-literal URLs, unallowlisted hosts, and DNS answers that include non-public addresses. Redirects are not followed. The monitoring scheduler checks enabled endpoints on the configured interval.
 
 ## Architecture
 
-- **Discovery source:** GitHub repository search API.
-- **Service:** FastAPI / Uvicorn.
-- **Persistence:** SQLAlchemy with PostgreSQL in Compose (SQLite fallback for development).
+- **Discovery:** GitHub REST API repository search.
+- **API:** FastAPI / Uvicorn.
+- **Persistence:** SQLAlchemy; PostgreSQL in Compose, SQLite for local development.
 - **Scheduler:** APScheduler.
-- **Deployment:** Docker Compose; PostgreSQL is on an internal network and the API port is bound to host loopback.
+- **Deployment:** Docker Compose, internal database network, API bound to host loopback.
+
+## Security boundaries
+
+- Configure a long random `ADMIN_API_TOKEN`; admin routes are disabled if it is missing.
+- Use only exact `MONITOR_ALLOWED_HOSTS` hostnames that you control. Do not use wildcards.
+- Keep the API private behind TLS and an authenticated reverse proxy. Do not expose PostgreSQL.
+- Use an outbound firewall to block internal/private and cloud metadata destinations.
+- DNS is checked before each probe, but the HTTP client resolves the hostname again at connection time; allowlist only trusted hosts and use network egress controls.
 
 ## Roadmap
 
-1. Add source connectors and deduplication beyond GitHub search.
-2. Add operator-registered endpoints with strict SSRF protections, DNS/IP validation, redirect controls, allowlists, and request budgets.
-3. Add opt-in endpoint health checks and timestamped observations.
-4. Add authentication, role-based access, audit logging, rate limits, and migrations.
-5. Build a dashboard, alerting, metrics/telemetry ingestion, and operational backups.
-6. Add CI, integration tests, and a verified VPS deployment.
+1. Pin monitored connections to the validated DNS address and add explicit egress controls.
+2. Add database migrations, rate limits, audit logs, and richer authorization.
+3. Add dashboard, alerts, metrics/telemetry ingestion, and more discovery sources.
+4. Run the CI suite, deploy to the VPS, configure TLS, and validate backups/restore.
 
 ## What “universal tracking” can and cannot mean
 
-There is no universal directory or protocol that reveals every AI agent. Public repository metadata can help discover projects, but private agents, local agents, ephemeral sessions, and agents that publish no telemetry cannot be reliably detected globally. Live monitoring requires an observable endpoint or explicit telemetry and permission from its operator.
+There is no universal directory or protocol that reveals every AI agent. Private agents, local agents, ephemeral sessions, and agents that publish no telemetry cannot be reliably discovered. Live monitoring requires an observable endpoint or explicit telemetry and permission from its operator.
 
-See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current implementation boundary and deployment checklist.
+See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for current limits and deployment requirements.
