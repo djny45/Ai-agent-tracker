@@ -4,6 +4,8 @@ This document distinguishes committed code from planned capabilities.
 
 ## Implemented
 
+- Read-only dashboard at `/` with search, summary counts, project links, reported status, and periodic refresh.
+
 - FastAPI app with health, agent-list, GitHub discovery, endpoint, and observation routes.
 - SQLAlchemy models for discovered repositories, observations, and explicitly registered endpoints.
 - GitHub public repository search connector with optional server-side token.
