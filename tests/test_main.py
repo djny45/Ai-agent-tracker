@@ -1,5 +1,6 @@
-from app.main import github_headers, parse_datetime, settings, validate_monitor_url
+from app.main import app, github_headers, parse_datetime, settings, validate_monitor_url
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 
 def test_parse_datetime_normalizes_z_timezone():
@@ -57,3 +58,11 @@ def test_monitor_url_fails_closed_when_allowlist_is_empty():
             raise AssertionError("Expected empty allowlist to reject endpoint")
     finally:
         settings.monitor_allowed_hosts = original
+
+
+def test_dashboard_is_served_from_root():
+    with TestClient(app) as client:
+        response = client.get("/")
+    assert response.status_code == 200
+    assert "AI Agent Tracker" in response.text
+    assert "No administrative token is stored in this page." in response.text
